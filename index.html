@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#570df8">
+<title>Pulse · News Aggregator</title>
+
+<!-- Favicon (inline SVG data URI) -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E📰%3C/text%3E%3C/svg%3E">
+
+<!-- Tailwind + daisyUI + Lucide -->
+<link href="https://cdn.jsdelivr.net/npm/daisyui@4.12.14/dist/full.min.css" rel="stylesheet" type="text/css">
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+
+<style>
+  .line-clamp-2{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .fav-on svg{fill:currentColor}          /* filled bookmark icon */
+  html{scroll-behavior:smooth}
+</style>
+</head>
+
+<body class="min-h-screen bg-base-200 text-base-content">
+
+<!-- ================= Top bar ================= -->
+<header class="navbar bg-base-100 shadow-sm sticky top-0 z-30 gap-2 px-3">
+  <div class="flex-1 flex items-center gap-2">
+    <i data-lucide="newspaper" class="w-6 h-6 text-primary"></i>
+    <span class="font-bold text-lg tracking-tight">Pulse</span>
+  </div>
+
+  <label class="input input-sm input-bordered flex items-center gap-2 w-32 sm:w-64">
+    <i data-lucide="search" class="w-4 h-4 opacity-60"></i>
+    <input id="search" type="search" class="grow bg-transparent outline-none" placeholder="Search...">
+  </label>
+
+  <button id="favBtn" class="btn btn-ghost btn-sm btn-circle" title="Show favorites">
+    <i data-lucide="bookmark" class="w-4 h-4"></i>
+  </button>
+  <button id="themeBtn" class="btn btn-ghost btn-sm btn-circle" title="Toggle theme"></button>
+  <button id="addBtn" class="btn btn-primary btn-sm gap-1">
+    <i data-lucide="plus" class="w-4 h-4"></i><span class="hidden sm:inline">Add</span>
+  </button>
+</header>
+
+<!-- ================= Content ================= -->
+<main class="max-w-7xl mx-auto p-3 sm:p-5">
+  <div id="cats" class="flex gap-2 overflow-x-auto pb-3"></div>
+  <div id="grid" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"></div>
+  <div id="empty" class="hidden text-center py-24 opacity-60">
+    <i data-lucide="newspaper" class="w-10 h-10 mx-auto mb-3"></i>
+    <p>No articles found.</p>
+  </div>
+</main>
+
+<!-- ================= Add-article modal ================= -->
+<dialog id="modal" class="modal">
+  <div class="modal-box">
+    <h3 class="font-bold text-lg mb-3">Add article</h3>
+    <form id="addForm" class="space-y-3">
+      <input name="title" required maxlength="80" placeholder="Headline" class="input input-bordered w-full">
+      <select name="cat" id="catSelect" class="select select-bordered w-full"></select>
+      <textarea name="summary" rows="2" maxlength="160" placeholder="Short summary"
+                class="textarea textarea-bordered w-full"></textarea>
+      <input name="image" type="file" accept="image/*" class="file-input file-input-bordered file-input-sm w-full">
+      <div class="modal-action">
+        <button type="button" id="cancelBtn" class="btn btn-ghost btn-sm">Cancel</button>
+        <button class="btn btn-primary btn-sm">Save</button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog>
+
+<script>
+/* =========================================================
+   1. IndexedDB helpers (no localStorage anywhere)
+   ========================================================= */
+const DB_NAME = 'pulse-db', DB_VER = 1;
+let db;
+
+const openDB = () => new Promise((resolve, reject) => {
+  const r = indexedDB.open(DB_NAME, DB_VER);
+  r.onupgradeneeded = e => {
+    const d = e.target.result;
+    d.createObjectStore('articles',  { keyPath: 'id' });
+    d.createObjectStore('favorites', { keyPath: 'id' });
+    d.createObjectStore('meta',      { keyPath: 'k' });
+  };
+  r.onsuccess = () => resolve(r.result);
+  r.onerror   = () => reject(r.error);
+});
+
+const req    = r => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+const store  = (name, mode = 'readonly') => db.transaction(name, mode).objectStore(name);
+const dbAll  = name      => req(store(name).getAll());
+const dbGet  = (name, k) => req(store(name).get(k));
+const dbPut  = (name, v) => req(store(name, 'readwrite').put(v));
+const dbDel  = (name, k) => req(store(name, 'readwrite').delete(k));
+
+/* =========================================================
+   2. State & constants
+   ========================================================= */
+const CATEGORIES = ['All', 'Technology', 'Business', 'Sports', 'Science', 'Health', 'Entertainment'];
+
+const state = { articles: [], favs: new Set(), category: 'All', query: '', onlyFavs: false };
+
+/* Mock news seed: [title, category, summary, gradient-from, gradient-to] */
+const SEED = [
+  ['AI Copilots Reshape Developer Workflows', 'Technology', 'Teams report big productivity gains as AI pair-programmers become a daily tool.', '#6366f1', '#8b5cf6'],
+  ['Foldable Phones Finally Get Durable', 'Technology', 'New hinge and glass technology pushes foldable durability past a million folds.', '#0ea5e9', '#22d3ee'],
+  ['Markets Rally on Rate Cut Hopes', 'Business', 'Global indices climb as inflation data cools and central banks signal patience.', '#10b981', '#34d399'],
+  ['Startups Bet Big on Climate Tech', 'Business', 'Venture funding for carbon capture and grid storage hits a new record this quarter.', '#f59e0b', '#fbbf24'],
+  ['Underdogs Stun Champions in Final', 'Sports', 'A late comeback seals one of the most dramatic finals in recent memory.', '#ef4444', '#f97316'],
+  ['Marathon Record Falls in Berlin', 'Sports', 'A new world best was set after years of near misses on the flat city course.', '#ec4899', '#f472b6'],
+  ['Webb Telescope Spots Water Vapor', 'Science', 'Astronomers detect clear signatures in a distant planetary atmosphere.', '#8b5cf6', '#a78bfa'],
+  ['Fusion Reactor Sustains Plasma Longer', 'Science', 'A private reactor keeps stable plasma for a record duration, a step toward the grid.', '#06b6d4', '#3b82f6'],
+  ['Sleep Study Links Screens and Recovery', 'Health', 'Reducing late-night screen time improved deep-sleep markers in participants.', '#14b8a6', '#2dd4bf'],
+  ['Walking Meetings Boost Focus', 'Health', 'Short walks during the workday measurably improved attention scores.', '#84cc16', '#a3e635'],
+  ['Streaming Wars Shift to Bundles', 'Entertainment', 'Platforms combine services to fight churn and rising content costs.', '#f43f5e', '#fb7185'],
+  ['Indie Game Becomes Surprise Hit', 'Entertainment', 'A two-person studio tops the charts with a hand-crafted adventure.', '#a855f7', '#d946ef']
+];
+
+/* =========================================================
+   3. Utilities
+   ========================================================= */
+const $   = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+
+/* Object-URL cache so blobs are only turned into URLs once */
+const urls = new Map();
+function imgURL(a) {
+  if (!a.image) return null;
+  if (!urls.has(a.id)) urls.set(a.id, URL.createObjectURL(a.image));
+  return urls.get(a.id);
+}
+function dropURL(id) {
+  if (urls.has(id)) { URL.revokeObjectURL(urls.get(id)); urls.delete(id); }
+}
+
+/* Generate a gradient SVG image as a binary Blob (mock article artwork) */
+function svgBlob(text, c1, c2) {
+  const t = String(text).replace(/[<>&]/g, '').slice(0, 26);
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360">
+       <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+         <stop offset="0" stop-color="${c1}"/><stop offset="1" stop-color="${c2}"/>
+       </linearGradient></defs>
+       <rect width="640" height="360" fill="url(#g)"/>
+       <circle cx="560" cy="60" r="120" fill="rgba(255,255,255,.12)"/>
+       <text x="40" y="300" fill="#fff" font-family="system-ui,sans-serif"
+             font-size="34" font-weight="700">${t}</text>
+     </svg>`;
+  return new Blob([svg], { type: 'image/svg+xml' });
+}
+
+/* =========================================================
+   4. Data loading
+   ========================================================= */
+async function seed() {
+  if ((await dbAll('articles')).length) return;
+  for (const [title, cat, summary, c1, c2] of SEED) {
+    await dbPut('articles', {
+      id: crypto.randomUUID(), title, cat, summary,
+      image: svgBlob(title, c1, c2), ts: Date.now() - Math.random() * 1e9
+    });
+  }
+}
+
+async function refresh() {
+  state.articles = (await dbAll('articles')).sort((a, b) => b.ts - a.ts);
+  state.favs = new Set((await dbAll('favorites')).map(f => f.id));
+  render();
+}
+
+/* =========================================================
+   5. Rendering
+   ========================================================= */
+function card(a) {
+  const url = imgURL(a);
+  const fav = state.favs.has(a.id);
+  return `
+  <article class="card bg-base-100 shadow-md hover:shadow-xl transition-shadow overflow-hidden">
+    <figure class="h-36 bg-base-300">
+      ${url
+        ? `<img src="${url}" alt="" loading="lazy" class="w-full h-full object-cover">`
+        : `<div class="flex items-center justify-center w-full h-full"><i data-lucide="image" class="w-7 h-7 opacity-40"></i></div>`}
+    </figure>
+    <div class="card-body p-4 gap-2">
+      <div class="flex items-center justify-between">
+        <span class="badge badge-secondary badge-sm">${esc(a.cat)}</span>
+        <div class="flex gap-1">
+          <button class="btn btn-ghost btn-xs btn-circle ${fav ? 'fav-on text-error' : ''}"
+                  data-fav="${a.id}" title="Favorite">
+            <i data-lucide="bookmark" class="w-4 h-4"></i>
+          </button>
+          <button class="btn btn-ghost btn-xs btn-circle" data-del="${a.id}" title="Delete">
+            <i data-lucide="trash-2" class="w-4 h-4"></i>
+          </button>
+        </div>
+      </div>
+      <h2 class="font-semibold leading-snug">${esc(a.title)}</h2>
+      <p class="text-sm opacity-70 line-clamp-2">${esc(a.summary)}</p>
+      <time class="text-xs opacity-50">${new Date(a.ts).toLocaleDateString()}</time>
+    </div>
+  </article>`;
+}
+
+function render() {
+  const q = state.query.trim().toLowerCase();
+  const list = state.articles.filter(a =>
+    (state.category === 'All' || a.cat === state.category) &&
+    (!state.onlyFavs || state.favs.has(a.id)) &&
+    (!q || (a.title + ' ' + a.summary).toLowerCase().includes(q))
+  );
+
+  $('#grid').innerHTML = list.map(card).join('');
+  $('#empty').classList.toggle('hidden', list.length > 0);
+  lucide.createIcons();
+}
+
+function renderCats() {
+  $('#cats').innerHTML = CATEGORIES.map(c => `
+    <button class="btn btn-sm whitespace-nowrap ${c === state.category ? 'btn-primary' : 'btn-ghost bg-base-100'}"
+            data-cat="${c}">${c}</button>`).join('');
+}
+
+/* =========================================================
+   6. Theme
+   ========================================================= */
+async function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  document.querySelector('meta[name=theme-color]').content = theme === 'dark' ? '#1d232a' : '#570df8';
+  $('#themeBtn').innerHTML = `<i data-lucide="${theme === 'dark' ? 'sun' : 'moon'}" class="w-4 h-4"></i>`;
+  lucide.createIcons();
+  await dbPut('meta', { k: 'theme', v: theme });
+}
+
+/* =========================================================
+   7. Events
+   ========================================================= */
+function bind() {
+  $('#search').addEventListener('input', e => { state.query = e.target.value; render(); });
+
+  $('#cats').addEventListener('click', e => {
+    const b = e.target.closest('[data-cat]');
+    if (!b) return;
+    state.category = b.dataset.cat;
+    renderCats(); render();
+  });
+
+  $('#grid').addEventListener('click', async e => {
+    const favBtn = e.target.closest('[data-fav]');
+    if (favBtn) {
+      const id = favBtn.dataset.fav;
+      state.favs.has(id) ? await dbDel('favorites', id) : await dbPut('favorites', { id, ts: Date.now() });
+      return refresh();
+    }
+    const delBtn = e.target.closest('[data-del]');
+    if (delBtn) {
+      const id = delBtn.dataset.del;
+      dropURL(id);
+      await dbDel('articles', id);
+      await dbDel('favorites', id);
+      return refresh();
+    }
+  });
+
+  $('#favBtn').addEventListener('click', e => {
+    state.onlyFavs = !state.onlyFavs;
+    e.currentTarget.classList.toggle('btn-active', state.onlyFavs);
+    render();
+  });
+
+  $('#themeBtn').addEventListener('click', () => {
+    applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
+  });
+
+  $('#addBtn').addEventListener('click', () => $('#modal').showModal());
+  $('#cancelBtn').addEventListener('click', () => $('#modal').close());
+
+  $('#addForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const f = e.target;
+    const file = f.image.files[0];
+    await dbPut('articles', {
+      id: crypto.randomUUID(),
+      title: f.title.value.trim(),
+      cat: f.cat.value,
+      summary: f.summary.value.trim() || 'No description provided.',
+      image: file || null,          // stored as Blob/File in IndexedDB
+      ts: Date.now()
+    });
+    f.reset();
+    $('#modal').close();
+    await refresh();
+  });
+}
+
+/* =========================================================
+   8. PWA: manifest via data URI + service worker via blob URL
+   ========================================================= */
+function setupPWA() {
+  const icon = "data:image/svg+xml," + encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+       <rect width="512" height="512" rx="96" fill="#570df8"/>
+       <text x="256" y="340" font-size="250" text-anchor="middle"
+             font-family="sans-serif">📰</text>
+     </svg>`);
+
+  const manifest = {
+    name: 'Pulse News', short_name: 'Pulse',
+    start_url: location.href, scope: location.href.replace(/[^/]*$/, ''),
+    display: 'standalone', background_color: '#ffffff', theme_color: '#570df8',
+    icons: [{ src: icon, sizes: '512x512', type: 'image/svg+xml', purpose: 'any maskable' }]
+  };
+
+  const link = document.createElement('link');
+  link.rel = 'manifest';
+  link.href = 'data:application/manifest+json;charset=utf-8,' + encodeURIComponent(JSON.stringify(manifest));
+  document.head.appendChild(link);
+
+  if (!('serviceWorker' in navigator) || !location.protocol.startsWith('http')) return;
+
+  const swSource = `
+    const CACHE = 'pulse-v1';
+    self.addEventListener('install', () => self.skipWaiting());
+    self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
+    self.addEventListener('fetch', e => {
+      if (e.request.method !== 'GET') return;
+      e.respondWith((async () => {
+        const cache = await caches.open(CACHE);
+        const hit = await cache.match(e.request);
+        const net = fetch(e.request)
+          .then(r => { cache.put(e.request, r.clone()); return r; })
+          .catch(() => hit);
+        return hit || net;
+      })());
+    });`;
+
+  try {
+    const url = URL.createObjectURL(new Blob([swSource], { type: 'text/javascript' }));
+    navigator.serviceWorker.register(url).catch(() => { /* blob SW unsupported in some browsers */ });
+  } catch (_) { /* ignore */ }
+}
+
+/* =========================================================
+   9. Boot
+   ========================================================= */
+(async function init() {
+  db = await openDB();
+  await seed();
+
+  const saved = await dbGet('meta', 'theme');
+  const theme = saved?.v || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  await applyTheme(theme);
+
+  // Category <select> inside the modal
+  $('#catSelect').innerHTML = CATEGORIES.filter(c => c !== 'All')
+    .map(c => `<option>${c}</option>`).join('');
+
+  renderCats();
+  bind();
+  await refresh();
+
+  setupPWA();
+  lucide.createIcons();
+})();
+</script>
+</body>
+</html>
